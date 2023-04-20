@@ -76,14 +76,14 @@ type PackageHistory struct {
 // A PackageUpdate is a point in history in the git changes, which is parsed
 // from a git.Commit
 type PackageUpdate struct {
-	Tag         string    // The associated git tag
-	Author      string    // The author name of the change
-	AuthorEmail string    // The author email of the change
-	Body        string    // The associated message of the commit
-	Time        time.Time // When the update took place
-	ObjectID    string    // OID stored in string form
-	Package     *Package  // Associated parsed package
-	IsSecurity  bool      // Whether this is a security update
+	Tag         string         // The associated git tag
+	Author      string         // The author name of the change
+	AuthorEmail string         // The author email of the change
+	Body        string         // The associated message of the commit
+	Time        time.Time      // When the update took place
+	Commit      *object.Commit // Ref
+	Package     *Package       // Associated parsed package
+	IsSecurity  bool           // Whether this is a security update
 }
 
 // NewPackageUpdate will attempt to parse the given commit and provide a usable
@@ -97,7 +97,7 @@ func NewPackageUpdate(tag string, commit *object.Commit, objectID string) *Packa
 	update.AuthorEmail = signature.Email
 	update.Body = commit.Message
 	update.Time = signature.When
-	update.ObjectID = objectID
+	update.Commit = commit
 
 	// Attempt to identify the update type. Limit to 1 match, we only need to
 	// know IF there is a CVE fix, not how many.
@@ -126,22 +126,7 @@ func CatGitBlob(repo *git.Repository, entry *object.TreeEntry) ([]byte, error) {
 
 // GetFileContents will attempt to read the entire object at path from
 // the given tag, within that repo.
-func GetFileContents(repo *git.Repository, name, path string) ([]byte, error) {
-	tag, err := repo.Tag(name)
-	if err != nil {
-		return nil, err
-	}
-
-	obj, err := repo.TagObject(tag.Hash())
-	if err != nil {
-		return nil, err
-	}
-
-	commit, err := repo.CommitObject(obj.Target)
-	if err != nil {
-		return nil, err
-	}
-
+func GetFileContents(repo *git.Repository, commit *object.Commit, path string) ([]byte, error) {
 	tree, err := commit.Tree()
 	if err != nil {
 		return nil, err
@@ -187,28 +172,17 @@ func NewPackageHistory(pkgfile string) (*PackageHistory, error) {
 		name := r.Name().String()
 		var commit *object.Commit
 
-		switch r.Type() {
-		// Unannotated tag
-		case plumbing.ReferenceType(plumbing.CommitObject):
+		obj, err := repo.TagObject(r.Hash())
+		switch err {
+		case nil:
+			// annotated
+			tagNames = append(tagNames, name)
+			commit, err = obj.Commit()
+			break
+		case plumbing.ErrObjectNotFound:
+			// not annotated
+			tagNames = append(tagNames, name)
 			commit, err = repo.CommitObject(r.Hash())
-			if err != nil {
-				return err
-			}
-
-			tagNames = append(tagNames, name)
-		// Annotated tag with commit target
-		case plumbing.ReferenceType(plumbing.TagObject):
-			tag, err := repo.TagObject(r.Hash())
-			if err != nil {
-				return err
-			}
-
-			commit, err = tag.Commit()
-			if err != nil {
-				return err
-			}
-
-			tagNames = append(tagNames, name)
 		default:
 			return fmt.Errorf("Internal git error, found %s", r.Type().String())
 		}
@@ -267,7 +241,7 @@ func (p *PackageHistory) scanUpdates(repo *git.Repository, updates map[string]*P
 		if update == nil {
 			continue
 		}
-		b, err := GetFileContents(repo, update.ObjectID, fname)
+		b, err := GetFileContents(repo, update.Commit, fname)
 		if err != nil {
 			continue
 		}
