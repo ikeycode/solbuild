@@ -98,18 +98,14 @@ func (g *GitSource) submodules(work *git.Worktree) error {
 }
 
 func clone(uri, path, ref string) (*git.Repository, error) {
-	refName := plumbing.NewRemoteReferenceName("origin", ref)
-
 	cloneOpts := git.CloneOptions{
 		URL:               uri,
-		ReferenceName:     refName,
-		SingleBranch:      true,
-		Depth:             1,
 		RecurseSubmodules: git.DefaultSubmoduleRecursionDepth,
 		Progress:          os.Stdout,
+		NoCheckout:        true,
 	}
 
-	return git.PlainClone(path, true, &cloneOpts)
+	return git.PlainClone(path, false, &cloneOpts)
 }
 
 // Fetch will attempt to download the git tree locally. If it already exists
@@ -117,14 +113,12 @@ func clone(uri, path, ref string) (*git.Repository, error) {
 func (g *GitSource) Fetch() error {
 	// First things first, make sure we have a destination
 	if !PathExists(g.ClonePath) {
-		log.Debugf("making shallow clone of repo at '%s'\n", g.ClonePath)
+		log.Debugf("making clone of repo at '%s'\n", g.ClonePath)
 
 		_, err := clone(g.URI, g.ClonePath, g.Ref)
 		if err != nil {
 			return err
 		}
-
-		return nil
 	}
 
 	// Repo already on disk, just open it
@@ -132,6 +126,19 @@ func (g *GitSource) Fetch() error {
 
 	repo, err := git.PlainOpen(g.ClonePath)
 	if err != nil {
+		return err
+	}
+
+	// Try to fetch the origin
+	fetchOptions := git.FetchOptions{
+		Force: true,
+	}
+	err = repo.Fetch(&fetchOptions)
+	switch err {
+	case git.NoErrAlreadyUpToDate:
+	case nil:
+		break
+	default:
 		return err
 	}
 
@@ -159,9 +166,27 @@ func (g *GitSource) Fetch() error {
 	checkoutOpts := git.CheckoutOptions{
 		Hash:  hash,
 		Force: true,
+		Keep:  false,
+	}
+	if err := work.Checkout(&checkoutOpts); err != nil {
+		return err
 	}
 
-	if err = work.Checkout(&checkoutOpts); err != nil {
+	// reset the tree to the given hash
+	resetOpts := git.ResetOptions{
+		Mode: git.HardReset,
+	}
+
+	if err = work.Reset(&resetOpts); err != nil {
+		return err
+	}
+
+	// finally, clean it..
+	cleanOpts := git.CleanOptions{
+		Dir: true,
+	}
+
+	if err = work.Clean(&cleanOpts); err != nil {
 		return err
 	}
 
@@ -171,13 +196,13 @@ func (g *GitSource) Fetch() error {
 	if err != nil {
 		return err
 	}
+
+	// as we run as root - pack files become unreadable so botch them to decent perms
 	for _, de := range entries {
-		info, err := de.Info()
-		if err != nil {
-			log.Errorf("error reading pack file '%s': %s\n", de.Name(), err)
+		if err := os.Chmod(filepath.Join(packDir, de.Name()), 0644); err != nil {
+			log.Errorf("error updating pack file permissions '%s': %s\n", de.Name(), err)
 			continue
 		}
-		log.Infof("pack file '%s' has mode '%s'\n", de.Name(), info.Mode().String())
 	}
 
 	return g.submodules(work)
